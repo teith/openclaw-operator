@@ -2664,7 +2664,7 @@ func TestEnrichConfigWithGatewayBind_InvalidJSON(t *testing.T) {
 
 func TestEnrichConfigWithDeviceAuth(t *testing.T) {
 	input := []byte(`{}`)
-	out, err := enrichConfigWithDeviceAuth(input)
+	out, err := enrichConfigWithDeviceAuth(input, newTestInstance("device-auth"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2689,7 +2689,7 @@ func TestEnrichConfigWithDeviceAuth(t *testing.T) {
 
 func TestEnrichConfigWithDeviceAuth_PreservesUserOverride(t *testing.T) {
 	input := []byte(`{"gateway":{"controlUi":{"dangerouslyDisableDeviceAuth":false}}}`)
-	out, err := enrichConfigWithDeviceAuth(input)
+	out, err := enrichConfigWithDeviceAuth(input, newTestInstance("device-auth"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2708,7 +2708,7 @@ func TestEnrichConfigWithDeviceAuth_PreservesUserOverride(t *testing.T) {
 
 func TestEnrichConfigWithDeviceAuth_PreservesOtherFields(t *testing.T) {
 	input := []byte(`{"gateway":{"auth":{"mode":"token","token":"secret"}}}`)
-	out, err := enrichConfigWithDeviceAuth(input)
+	out, err := enrichConfigWithDeviceAuth(input, newTestInstance("device-auth"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2737,13 +2737,30 @@ func TestEnrichConfigWithDeviceAuth_PreservesOtherFields(t *testing.T) {
 
 func TestEnrichConfigWithDeviceAuth_InvalidJSON(t *testing.T) {
 	input := []byte(`not valid json`)
-	out, err := enrichConfigWithDeviceAuth(input)
+	out, err := enrichConfigWithDeviceAuth(input, newTestInstance("device-auth"))
 	if err != nil {
 		t.Fatal("should not error on invalid JSON")
 	}
 
 	if !bytes.Equal(out, input) {
 		t.Errorf("invalid JSON should be returned unchanged")
+	}
+}
+
+func TestEnrichConfigWithDeviceAuth_RetiredOnNewGateway(t *testing.T) {
+	// 2026.10.1+ retires the break-glass key and its startup doctor deletes it;
+	// injecting it again would make the config-guard fight the doctor.
+	for _, tag := range []string{"2026.10.1", "v2026.10.6"} {
+		instance := newTestInstance("device-auth-new")
+		instance.Spec.Image.Tag = tag
+		input := []byte(`{"gateway":{"auth":{"mode":"token"}}}`)
+		out, err := enrichConfigWithDeviceAuth(input, instance)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(out, input) {
+			t.Errorf("tag %s: config must be untouched, got %s", tag, out)
+		}
 	}
 }
 

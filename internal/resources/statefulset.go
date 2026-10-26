@@ -1123,11 +1123,18 @@ const pruneRetiredConfigKeysScript = `node -e 'const fs=require("fs");const F="/
 // it unconditionally would break every instance still on an older gateway.
 const pluginsAcceptCapabilitiesMinVersion = "2026.10.1"
 
-// pluginsAcceptCapabilities reports whether the instance's gateway tag (or the
-// tag paired with its digest pin) understands --accept-capabilities.
-// Unparseable tags ("latest", ""), which older builds and custom images use,
-// keep the legacy command line.
-func pluginsAcceptCapabilities(instance *openclawv1alpha1.OpenClawInstance) bool {
+// gatewayRetiredDeviceAuthMinVersion is the first upstream release that retires
+// gateway.controlUi.dangerouslyDisableDeviceAuth (the break-glass key is inert
+// and its startup `doctor --fix` deletes it). Injecting it into the ConfigMap
+// on that gateway makes the config-guard fight the doctor: the doctor deletes
+// the key, the guard re-applies CR.raw (which carries it from the ConfigMap),
+// the doctor sees the file change and aborts non-zero — pods restart-loop.
+const gatewayRetiredDeviceAuthMinVersion = "2026.10.1"
+
+// gatewayVersionAtLeast reports whether the instance's gateway tag (or the tag
+// paired with its digest pin) is >= min. Unparseable tags ("latest", "") keep
+// the legacy behaviour: false.
+func gatewayVersionAtLeast(instance *openclawv1alpha1.OpenClawInstance, min string) bool {
 	tag := strings.TrimPrefix(strings.TrimSpace(instance.Spec.Image.Tag), "v")
 	if tag == "" {
 		return false
@@ -1136,11 +1143,17 @@ func pluginsAcceptCapabilities(instance *openclawv1alpha1.OpenClawInstance) bool
 	if err != nil {
 		return false
 	}
-	minVersion, err := semver.NewVersion(pluginsAcceptCapabilitiesMinVersion)
+	minimum, err := semver.NewVersion(min)
 	if err != nil {
 		return false
 	}
-	return !got.LessThan(minVersion)
+	return !got.LessThan(minimum)
+}
+
+// pluginsAcceptCapabilities reports whether the instance's gateway understands
+// --accept-capabilities.
+func pluginsAcceptCapabilities(instance *openclawv1alpha1.OpenClawInstance) bool {
+	return gatewayVersionAtLeast(instance, pluginsAcceptCapabilitiesMinVersion)
 }
 
 // parsePluginEntry returns the shell command to install a single plugin entry

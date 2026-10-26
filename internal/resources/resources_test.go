@@ -6390,6 +6390,29 @@ func TestBuildPluginsScript_AcceptCapabilitiesForNewGateway(t *testing.T) {
 	}
 }
 
+func TestBuildPluginsScript_PrunesRetiredConfigKeysOnNewGateway(t *testing.T) {
+	instance := newTestInstance("prune-new")
+	instance.Spec.Image.Tag = "2026.10.6"
+	instance.Spec.Plugins = []string{"npm:@teith/openclaw-runware-provider@0.4.7"}
+
+	script := BuildPluginsScript(instance)
+	if !strings.Contains(script, "dangerouslyDisableDeviceAuth") || !strings.Contains(script, ".prune-tmp") {
+		t.Errorf("expected the retired-key prune before the install, got:\n%s", script)
+	}
+	// The prune must run before the first CLI call, otherwise the CLI refuses
+	// to start against the invalid config it is meant to fix.
+	if strings.Index(script, ".prune-tmp") > strings.Index(script, "openclaw plugins install") {
+		t.Errorf("prune must precede the install command, got:\n%s", script)
+	}
+
+	old := newTestInstance("prune-old")
+	old.Spec.Image.Tag = "2026.7.1"
+	old.Spec.Plugins = []string{"npm:@teith/openclaw-runware-provider@0.4.7"}
+	if strings.Contains(BuildPluginsScript(old), ".prune-tmp") {
+		t.Error("old gateway (no retired keys) must not prune the config")
+	}
+}
+
 func TestBuildPluginsScript_NoAcceptCapabilitiesForOldGateway(t *testing.T) {
 	instance := newTestInstance("old-gateway")
 	instance.Spec.Image.Tag = "2026.7.1"

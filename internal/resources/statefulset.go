@@ -33,6 +33,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	openclawv1alpha1 "github.com/paperclipinc/openclaw-operator/api/v1alpha1"
+
+	"github.com/Masterminds/semver/v3"
 )
 
 // BuildStatefulSet creates a StatefulSet for the OpenClawInstance.
@@ -1103,6 +1105,34 @@ func buildSkillsInitContainer(instance *openclawv1alpha1.OpenClawInstance) *core
 	}
 }
 
+// pluginsAcceptCapabilitiesMinVersion is the first upstream release whose
+// `openclaw plugins install` understands --accept-capabilities. 2026.10.1+
+// refuses to install a plugin that declares capabilities without that explicit
+// acknowledgement (the Runware provider does), while older builds treat the flag
+// as an unknown option and exit non-zero, so it has to be version-gated: adding
+// it unconditionally would break every instance still on an older gateway.
+const pluginsAcceptCapabilitiesMinVersion = "2026.10.1"
+
+// pluginsAcceptCapabilities reports whether the instance's gateway tag (or the
+// tag paired with its digest pin) understands --accept-capabilities.
+// Unparseable tags ("latest", ""), which older builds and custom images use,
+// keep the legacy command line.
+func pluginsAcceptCapabilities(instance *openclawv1alpha1.OpenClawInstance) bool {
+	tag := strings.TrimPrefix(strings.TrimSpace(instance.Spec.Image.Tag), "v")
+	if tag == "" {
+		return false
+	}
+	got, err := semver.NewVersion(tag)
+	if err != nil {
+		return false
+	}
+	minVersion, err := semver.NewVersion(pluginsAcceptCapabilitiesMinVersion)
+	if err != nil {
+		return false
+	}
+	return !got.LessThan(minVersion)
+}
+
 // parsePluginEntry returns the shell command to install a single plugin entry
 // via the OpenClaw CLI. Entries without a prefix are routed through ClawHub
 // (`clawhub:<spec>`); entries prefixed with "npm:" are routed through the
@@ -1114,11 +1144,15 @@ func buildSkillsInitContainer(instance *openclawv1alpha1.OpenClawInstance) *core
 // gateway's plugin discovery expects (#474). First-party ClawHub plugins
 // (e.g. `@openclaw/matrix`) also use `workspace:*` dependency markers that
 // raw npm rejects with EUNSUPPORTEDPROTOCOL (#505).
-func parsePluginEntry(entry string) string {
-	if pkg, ok := strings.CutPrefix(entry, "npm:"); ok {
-		return fmt.Sprintf("openclaw plugins install --force %s", shellQuote("npm:"+pkg))
+func parsePluginEntry(entry string, acceptCapabilities bool) string {
+	flags := "--force"
+	if acceptCapabilities {
+		flags += " --accept-capabilities"
 	}
-	return fmt.Sprintf("openclaw plugins install --force %s", shellQuote("clawhub:"+entry))
+	if pkg, ok := strings.CutPrefix(entry, "npm:"); ok {
+		return fmt.Sprintf("openclaw plugins install %s %s", flags, shellQuote("npm:"+pkg))
+	}
+	return fmt.Sprintf("openclaw plugins install %s %s", flags, shellQuote("clawhub:"+entry))
 }
 
 // BuildPluginsScript generates the shell script for the plugins init container.
@@ -1133,12 +1167,14 @@ func BuildPluginsScript(instance *openclawv1alpha1.OpenClawInstance) string {
 	copy(sorted, plugins)
 	sort.Strings(sorted)
 
+	acceptCapabilities := pluginsAcceptCapabilities(instance)
+
 	lines := []string{
 		"set -e",
 		"mkdir -p /home/openclaw/.openclaw/extensions",
 	}
 	for _, plugin := range sorted {
-		lines = append(lines, parsePluginEntry(plugin))
+		lines = append(lines, parsePluginEntry(plugin, acceptCapabilities))
 	}
 	return strings.Join(lines, "\n")
 }

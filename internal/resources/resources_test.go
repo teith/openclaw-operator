@@ -6319,7 +6319,7 @@ func TestBuildStatefulSet_SkillsOnly_HasBothInitContainers(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestParsePluginEntry_Basic(t *testing.T) {
-	got := parsePluginEntry("@martian-engineering/lossless-claw")
+	got := parsePluginEntry("@martian-engineering/lossless-claw", false)
 	want := "openclaw plugins install --force 'clawhub:@martian-engineering/lossless-claw'"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -6327,7 +6327,7 @@ func TestParsePluginEntry_Basic(t *testing.T) {
 }
 
 func TestParsePluginEntry_WithNpmPrefix(t *testing.T) {
-	got := parsePluginEntry("npm:@openclaw/some-plugin")
+	got := parsePluginEntry("npm:@openclaw/some-plugin", false)
 	want := "openclaw plugins install --force 'npm:@openclaw/some-plugin'"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -6335,10 +6335,69 @@ func TestParsePluginEntry_WithNpmPrefix(t *testing.T) {
 }
 
 func TestParsePluginEntry_Unscoped(t *testing.T) {
-	got := parsePluginEntry("some-plugin")
+	got := parsePluginEntry("some-plugin", false)
 	want := "openclaw plugins install --force 'clawhub:some-plugin'"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestParsePluginEntry_AcceptCapabilities(t *testing.T) {
+	got := parsePluginEntry("npm:@teith/openclaw-runware-provider@0.4.7", true)
+	want := "openclaw plugins install --force --accept-capabilities 'npm:@teith/openclaw-runware-provider@0.4.7'"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if got := parsePluginEntry("some-plugin", true); got != "openclaw plugins install --force --accept-capabilities 'clawhub:some-plugin'" {
+		t.Errorf("unexpected clawhub command: %q", got)
+	}
+}
+
+// 2026.10.1 gates `openclaw plugins install` behind --accept-capabilities; older
+// builds reject that flag outright, so it must follow the gateway tag.
+func TestPluginsAcceptCapabilities_VersionGate(t *testing.T) {
+	cases := []struct {
+		tag  string
+		want bool
+	}{
+		{"", false},
+		{"latest", false},
+		{"2026.7.1", false},
+		{"v2026.7.1", false},
+		{"2026.10.0", false},
+		{"2026.10.1", true},
+		{"v2026.10.6", true},
+		{"2026.10.6", true},
+	}
+	for _, c := range cases {
+		instance := newTestInstance("gate")
+		instance.Spec.Image.Tag = c.tag
+		if got := pluginsAcceptCapabilities(instance); got != c.want {
+			t.Errorf("pluginsAcceptCapabilities(tag=%q) = %v, want %v", c.tag, got, c.want)
+		}
+	}
+}
+
+func TestBuildPluginsScript_AcceptCapabilitiesForNewGateway(t *testing.T) {
+	instance := newTestInstance("new-gateway")
+	instance.Spec.Image.Tag = "2026.10.6"
+	instance.Spec.Plugins = []string{"npm:@teith/openclaw-runware-provider@0.4.7"}
+
+	script := BuildPluginsScript(instance)
+	want := "openclaw plugins install --force --accept-capabilities 'npm:@teith/openclaw-runware-provider@0.4.7'"
+	if !strings.Contains(script, want) {
+		t.Errorf("expected %q in script, got:\n%s", want, script)
+	}
+}
+
+func TestBuildPluginsScript_NoAcceptCapabilitiesForOldGateway(t *testing.T) {
+	instance := newTestInstance("old-gateway")
+	instance.Spec.Image.Tag = "2026.7.1"
+	instance.Spec.Plugins = []string{"npm:@teith/openclaw-runware-provider@0.4.7"}
+
+	script := BuildPluginsScript(instance)
+	if strings.Contains(script, "--accept-capabilities") {
+		t.Errorf("old gateway must not receive --accept-capabilities, got:\n%s", script)
 	}
 }
 
@@ -6351,7 +6410,7 @@ func TestParsePluginEntry_Versioned(t *testing.T) {
 		{"npm:@openclaw/brave-plugin@1.2.3", "openclaw plugins install --force 'npm:@openclaw/brave-plugin@1.2.3'"},
 	}
 	for _, c := range cases {
-		if got := parsePluginEntry(c.entry); got != c.want {
+		if got := parsePluginEntry(c.entry, false); got != c.want {
 			t.Errorf("parsePluginEntry(%q) = %q, want %q", c.entry, got, c.want)
 		}
 	}

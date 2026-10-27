@@ -1108,12 +1108,15 @@ func buildSkillsInitContainer(instance *openclawv1alpha1.OpenClawInstance) *core
 // pruneRetiredConfigKeysScript drops config keys that gateway 2026.10.1+
 // retired but that survive on the PVC: the operator merges CR.raw into the
 // existing openclaw.json ("adds or updates keys"), so a key removed from raw
-// stays on the volume — and with `tools.exec.mode` and
-// `tools.exec.security`/`ask` present at once the CLI refuses to run at all
-// ("config is invalid"), which fail-loops this init container before the
-// gateway ever starts. The gateway's own `doctor --fix` prunes the same keys,
-// but it runs in the gateway container, i.e. after this one. Idempotent.
-const pruneRetiredConfigKeysScript = `node -e 'const fs=require("fs");const F="/home/openclaw/.openclaw/openclaw.json";let c;try{c=JSON.parse(fs.readFileSync(F,"utf8"))}catch(e){process.exit(0)}let d=0;const g=c.gateway&&c.gateway.controlUi;if(g&&"dangerouslyDisableDeviceAuth"in g){delete g.dangerouslyDisableDeviceAuth;d++}const x=c.tools&&c.tools.exec;if(x&&x.mode){if("security"in x){delete x.security;d++}if("ask"in x){delete x.ask;d++}}if(d){const t=F+".prune-tmp";fs.writeFileSync(t,JSON.stringify(c,null,2));fs.renameSync(t,F);console.log("prune-retired-config: removed "+d)}'`
+// stays on the volume. The new gateway's schema REJECTS several of them as
+// unrecognized (meta.lastTouchedAt, logging.redactSensitive, cron.store,
+// tts.prefsPath, commands.useAccessGroups, plugins.bundledDiscovery, ...) and
+// the CLI refuses to run at all while any is present — which fail-loops this
+// init container before the gateway ever starts and before `doctor --fix`
+// (which prunes exactly these) can run. List mirrors the doctor's retired-path
+// tables; idempotent; also drops tools.exec.security/ask once mode is set.
+const pruneRetiredConfigKeysScript = `node -e 'const fs=require("fs");const F="/home/openclaw/.openclaw/openclaw.json";let c;try{c=JSON.parse(fs.readFileSync(F,"utf8"))}catch(e){process.exit(0)}let d=0;const R=["meta.lastTouchedAt","cron.store","plugins.bundledDiscovery","tts.prefsPath","logging.redactSensitive","commands.useAccessGroups","gateway.controlUi.allowInsecureAuth","gateway.controlUi.dangerouslyDisableDeviceAuth","hooks.internal.installs"];for(const p of R){const ks=p.split(".");const l=ks.pop();let o=c;for(const k of ks){o=o&&o[k]}if(o&&Object.prototype.hasOwnProperty.call(o,l)){delete o[l];d++}}const x=c.tools&&c.tools.exec;if(x&&x.mode){if("security"in x){delete x.security;d++}if("ask"in x){delete x.ask;d++}}if(d){const t=F+".prune-tmp";fs.writeFileSync(t,JSON.stringify(c,null,2));fs.renameSync(t,F);console.log("prune-retired-config: removed "+d)}'
+`
 
 // pluginsAcceptCapabilitiesMinVersion is the first upstream release whose
 // `openclaw plugins install` understands --accept-capabilities. 2026.10.1+

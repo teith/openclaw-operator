@@ -33,6 +33,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	openclawv1alpha1 "github.com/paperclipinc/openclaw-operator/api/v1alpha1"
+
+	"github.com/Masterminds/semver/v3"
 )
 
 // BuildStatefulSet creates a StatefulSet for the OpenClawInstance.
@@ -1103,6 +1105,60 @@ func buildSkillsInitContainer(instance *openclawv1alpha1.OpenClawInstance) *core
 	}
 }
 
+// pruneRetiredConfigKeysScript drops config keys that gateway 2026.10.1+
+// retired but that survive on the PVC: the operator merges CR.raw into the
+// existing openclaw.json ("adds or updates keys"), so a key removed from raw
+// stays on the volume. The new gateway's schema REJECTS several of them as
+// unrecognized (meta.lastTouchedAt, logging.redactSensitive, cron.store,
+// tts.prefsPath, commands.useAccessGroups, plugins.bundledDiscovery, ...) and
+// the CLI refuses to run at all while any is present — which fail-loops this
+// init container before the gateway ever starts and before `doctor --fix`
+// (which prunes exactly these) can run. List mirrors the doctor's retired-path
+// tables; idempotent; also drops tools.exec.security/ask once mode is set.
+const pruneRetiredConfigKeysScript = `node -e 'const fs=require("fs");const F="/home/openclaw/.openclaw/openclaw.json";let c;try{c=JSON.parse(fs.readFileSync(F,"utf8"))}catch(e){process.exit(0)}let d=0;const R=["meta.lastTouchedAt","cron.store","plugins.bundledDiscovery","tts.prefsPath","logging.redactSensitive","commands.useAccessGroups","gateway.controlUi.allowInsecureAuth","gateway.controlUi.dangerouslyDisableDeviceAuth","hooks.internal.installs"];for(const p of R){const ks=p.split(".");const l=ks.pop();let o=c;for(const k of ks){o=o&&o[k]}if(o&&Object.prototype.hasOwnProperty.call(o,l)){delete o[l];d++}}const x=c.tools&&c.tools.exec;if(x&&x.mode){if("security"in x){delete x.security;d++}if("ask"in x){delete x.ask;d++}}if(d){const t=F+".prune-tmp";fs.writeFileSync(t,JSON.stringify(c,null,2));fs.renameSync(t,F);console.log("prune-retired-config: removed "+d)}'
+`
+
+// pluginsAcceptCapabilitiesMinVersion is the first upstream release whose
+// `openclaw plugins install` understands --accept-capabilities. 2026.10.1+
+// refuses to install a plugin that declares capabilities without that explicit
+// acknowledgement (the Runware provider does), while older builds treat the flag
+// as an unknown option and exit non-zero, so it has to be version-gated: adding
+// it unconditionally would break every instance still on an older gateway.
+const pluginsAcceptCapabilitiesMinVersion = "2026.10.1"
+
+// gatewayRetiredDeviceAuthMinVersion is the first upstream release that retires
+// gateway.controlUi.dangerouslyDisableDeviceAuth (the break-glass key is inert
+// and its startup `doctor --fix` deletes it). Injecting it into the ConfigMap
+// on that gateway makes the config-guard fight the doctor: the doctor deletes
+// the key, the guard re-applies CR.raw (which carries it from the ConfigMap),
+// the doctor sees the file change and aborts non-zero — pods restart-loop.
+const gatewayRetiredDeviceAuthMinVersion = "2026.10.1"
+
+// gatewayVersionAtLeast reports whether the instance's gateway tag (or the tag
+// paired with its digest pin) is >= min. Unparseable tags ("latest", "") keep
+// the legacy behaviour: false.
+func gatewayVersionAtLeast(instance *openclawv1alpha1.OpenClawInstance, min string) bool {
+	tag := strings.TrimPrefix(strings.TrimSpace(instance.Spec.Image.Tag), "v")
+	if tag == "" {
+		return false
+	}
+	got, err := semver.NewVersion(tag)
+	if err != nil {
+		return false
+	}
+	minimum, err := semver.NewVersion(min)
+	if err != nil {
+		return false
+	}
+	return !got.LessThan(minimum)
+}
+
+// pluginsAcceptCapabilities reports whether the instance's gateway understands
+// --accept-capabilities.
+func pluginsAcceptCapabilities(instance *openclawv1alpha1.OpenClawInstance) bool {
+	return gatewayVersionAtLeast(instance, pluginsAcceptCapabilitiesMinVersion)
+}
+
 // parsePluginEntry returns the shell command to install a single plugin entry
 // via the OpenClaw CLI. Entries without a prefix are routed through ClawHub
 // (`clawhub:<spec>`); entries prefixed with "npm:" are routed through the
@@ -1114,11 +1170,15 @@ func buildSkillsInitContainer(instance *openclawv1alpha1.OpenClawInstance) *core
 // gateway's plugin discovery expects (#474). First-party ClawHub plugins
 // (e.g. `@openclaw/matrix`) also use `workspace:*` dependency markers that
 // raw npm rejects with EUNSUPPORTEDPROTOCOL (#505).
-func parsePluginEntry(entry string) string {
-	if pkg, ok := strings.CutPrefix(entry, "npm:"); ok {
-		return fmt.Sprintf("openclaw plugins install --force %s", shellQuote("npm:"+pkg))
+func parsePluginEntry(entry string, acceptCapabilities bool) string {
+	flags := "--force"
+	if acceptCapabilities {
+		flags += " --accept-capabilities"
 	}
-	return fmt.Sprintf("openclaw plugins install --force %s", shellQuote("clawhub:"+entry))
+	if pkg, ok := strings.CutPrefix(entry, "npm:"); ok {
+		return fmt.Sprintf("openclaw plugins install %s %s", flags, shellQuote("npm:"+pkg))
+	}
+	return fmt.Sprintf("openclaw plugins install %s %s", flags, shellQuote("clawhub:"+entry))
 }
 
 // BuildPluginsScript generates the shell script for the plugins init container.
@@ -1133,12 +1193,17 @@ func BuildPluginsScript(instance *openclawv1alpha1.OpenClawInstance) string {
 	copy(sorted, plugins)
 	sort.Strings(sorted)
 
+	acceptCapabilities := pluginsAcceptCapabilities(instance)
+
 	lines := []string{
 		"set -e",
 		"mkdir -p /home/openclaw/.openclaw/extensions",
 	}
+	if acceptCapabilities {
+		lines = append(lines, pruneRetiredConfigKeysScript)
+	}
 	for _, plugin := range sorted {
-		lines = append(lines, parsePluginEntry(plugin))
+		lines = append(lines, parsePluginEntry(plugin, acceptCapabilities))
 	}
 	return strings.Join(lines, "\n")
 }

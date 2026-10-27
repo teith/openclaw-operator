@@ -69,7 +69,7 @@ func BuildConfigMapFromBytes(instance *openclawv1alpha1.OpenClawInstance, baseCo
 			configBytes = enriched
 		}
 	}
-	if enriched, err := enrichConfigWithDeviceAuth(configBytes); err == nil {
+	if enriched, err := enrichConfigWithDeviceAuth(configBytes, instance); err == nil {
 		configBytes = enriched
 	}
 	if instance.Spec.Tailscale.Enabled {
@@ -258,7 +258,17 @@ service:
 // because (1) users cannot approve pairing from inside a container, (2) connections
 // always come through the nginx proxy sidecar (non-local), and (3) mDNS does not work
 // in K8s. If the user has already set the field, the config is returned unchanged.
-func enrichConfigWithDeviceAuth(configJSON []byte) ([]byte, error) {
+//
+// Gateway 2026.10.1+ retires the key: it is inert (Control UI browsers pair via
+// the normal device flow) and its container entrypoint runs `doctor --fix`
+// before the gateway starts, which deletes it. Injecting it on those builds
+// makes the config-guard fight the doctor (delete -> re-apply -> abort), which
+// restart-loops every pod, so the key is only injected on older gateways.
+func enrichConfigWithDeviceAuth(configJSON []byte, instance *openclawv1alpha1.OpenClawInstance) ([]byte, error) {
+	if gatewayVersionAtLeast(instance, gatewayRetiredDeviceAuthMinVersion) {
+		return configJSON, nil
+	}
+
 	var config map[string]interface{}
 	if err := json.Unmarshal(configJSON, &config); err != nil {
 		return configJSON, nil // not a JSON object, return unchanged
